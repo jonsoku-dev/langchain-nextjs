@@ -1,23 +1,23 @@
-import { NextRequest, NextResponse } from "next/server";
-import { Message as VercelChatMessage, StreamingTextResponse } from "ai";
-
-import { createClient } from "@supabase/supabase-js";
-
-import { ChatOpenAI } from "langchain/chat_models/openai";
-import { PromptTemplate } from "langchain/prompts";
-import { SupabaseVectorStore } from "langchain/vectorstores/supabase";
+import { StreamingTextResponse, Message as VercelChatMessage } from "ai";
 import { Document } from "langchain/document";
-import {
-  RunnableSequence,
-  RunnablePassthrough,
-} from "langchain/schema/runnable";
+import { OpenAIEmbeddings } from "langchain/embeddings/openai";
+import { Ollama } from "langchain/llms/ollama";
+import { PromptTemplate } from "langchain/prompts";
 import {
   BytesOutputParser,
   StringOutputParser,
 } from "langchain/schema/output_parser";
-import { OpenAIEmbeddings } from "langchain/embeddings/openai";
+import {
+  RunnablePassthrough,
+  RunnableSequence,
+} from "langchain/schema/runnable";
+import { NextRequest, NextResponse } from "next/server";
 
-export const runtime = "edge";
+import { Prisma, Document as PrismaDocument } from "@prisma/client";
+import { PrismaVectorStore } from "langchain/vectorstores/prisma";
+import { db } from "../../../../libs/db";
+
+export const runtime = "nodejs";
 
 type ConversationalRetrievalQAChainInput = {
   question: string;
@@ -52,11 +52,7 @@ const condenseQuestionPrompt = PromptTemplate.fromTemplate(
   CONDENSE_QUESTION_TEMPLATE,
 );
 
-const ANSWER_TEMPLATE = `You are an energetic talking puppy named Dana, and must answer all questions like a happy, talking dog would.
-Use lots of puns!
-
-Answer the question based only on the following context:
-{context}
+const ANSWER_TEMPLATE = `Answer the question based only on the following context:{context}
 
 Question: {question}
 `;
@@ -72,24 +68,53 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const messages = body.messages ?? [];
+
+    console.log({ messages });
     const previousMessages = messages.slice(0, -1);
     const currentMessageContent = messages[messages.length - 1].content;
 
-    const model = new ChatOpenAI({
-      modelName: "gpt-4",
+    // const model = new ChatOpenAI({
+    //   modelName: "gpt-3.5-turbo",
+    // });
+    const model = new Ollama({
+      baseUrl: "http://localhost:11434",
+      model: "llama2",
+      temperature: 0,
+      verbose: true,
     });
 
-    const client = createClient(
-      process.env.SUPABASE_URL!,
-      process.env.SUPABASE_PRIVATE_KEY!,
+    // const vectorStore = await Chroma.fromExistingCollection(
+    //   new OpenAIEmbeddings(),
+    //   {
+    //     collectionName: "a-test-collection",
+    //     // streamlit run viewer.py http://127.0.0.1:7080
+    //     url: "http://127.0.0.1:7080", // Optional, will default to this value
+    //     collectionMetadata: {
+    //       "hnsw:space": "cosine",
+    //     }, // Optional, can be used to specify the distance method of the embedding space https://docs.trychroma.com/usage-guide#changing-the-distance-function
+    //   },
+    // );
+
+    // const vectorStore = new OpenSearchVectorStore(new OpenAIEmbeddings(), {
+    //   client,
+    //   indexName: "lookbook", // Will default to `documents`
+    // });
+
+    // create an instance with default filter
+    const vectorStore2 = PrismaVectorStore.withModel<PrismaDocument>(db).create(
+      new OpenAIEmbeddings(),
+      {
+        prisma: Prisma,
+        tableName: "Document",
+        vectorColumnName: "vector",
+        columns: {
+          id: PrismaVectorStore.IdColumn,
+          content: PrismaVectorStore.ContentColumn,
+        },
+      },
     );
-    const vectorstore = new SupabaseVectorStore(new OpenAIEmbeddings(), {
-      client,
-      tableName: "documents",
-      queryName: "match_documents",
-    });
 
-    const retriever = vectorstore.asRetriever();
+    const retriever = vectorStore2.asRetriever();
 
     /**
      * We use LangChain Expression Language to compose two chains.
